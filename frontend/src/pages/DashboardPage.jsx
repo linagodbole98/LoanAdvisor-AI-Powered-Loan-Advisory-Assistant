@@ -95,26 +95,24 @@ const DashboardPage = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const recommendations = JSON.parse(
-    localStorage.getItem("recommentation")
-    );
+    localStorage.getItem("recommendation") || localStorage.getItem("recommentation")
+  );
   const [data, setData] = useState(recommendations);
   const [loading, setLoading] = useState(true);
   const [showIneligible, setShowIneligible] = useState(false);
-  const profile = JSON.parse(
-    localStorage.getItem("loanProfile")
-    );
+  const savedProfile = JSON.parse(localStorage.getItem("loanProfile"));
 
   
   console.log(user,"user",recommendations)
 
   const fetchRecommendations = useCallback(async () => {
     try {
-      const profile = user?.loanProfile || profile;
-      if (!profile?.loanAmount) {
+      const profileToUse = user?.loanProfile || savedProfile;
+      if (!profileToUse?.loanAmount) {
         navigate("/loan-form");
         return;
       }
-      const res = await loanService.recommend(profile);
+      const res = await loanService.recommend(profileToUse);
       setData(res.data || recommendations);
     } catch (err) {
       if (err.response?.status === 400) {

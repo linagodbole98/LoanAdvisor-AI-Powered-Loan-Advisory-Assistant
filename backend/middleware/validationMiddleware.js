@@ -71,7 +71,7 @@ const chatValidation = [
     .withMessage("Message cannot be empty")
     .isLength({ max: 1000 })
     .withMessage("Message too long (max 1000 characters)"),
-  body("sessionId").optional().isMongoId().withMessage("Invalid session ID"),
+    body("sessionId").optional({ nullable: true }).isMongoId().withMessage("Invalid session ID"),
   validate,
 ];
 

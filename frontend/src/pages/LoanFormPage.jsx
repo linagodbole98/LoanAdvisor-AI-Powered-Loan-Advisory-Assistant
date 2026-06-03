@@ -44,14 +44,14 @@ const LoanFormPage = () => {
       console.log(res,"res")
 
       localStorage.setItem(
-      "loanProfile",
-      JSON.stringify(form)
+        "loanProfile",
+        JSON.stringify(form)
       );
 
       localStorage.setItem(
-        "recommentation",
-        JSON.stringify(res?.data || [])
-        );
+        "recommendation",
+        JSON.stringify(res?.data || {})
+      );
 
       toast.success("Profile submitted! Generating recommendations...");
 
