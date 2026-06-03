@@ -275,4 +275,5 @@ Multi-turn context: last 6 messages are included in each request to support conv
 
 *Built for the AI-Powered Loan Advisory Assignment. Architecture prioritizes clean separation of concerns, responsible AI behavior, and correct financial calculations.*
 
+<img width="1880" height="895" alt="image" src="https://github.com/user-attachments/assets/6e9fc9ed-2995-462b-ae38-2f61fc963ca4" />
 
