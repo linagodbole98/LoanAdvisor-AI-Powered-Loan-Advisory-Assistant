@@ -15,8 +15,14 @@ export const loanService = {
 
 // Chat
 export const chatService = {
-  sendMessage: (message, sessionId) =>
-    api.post("/chat/advisor", { message, sessionId }),
+  /**
+   * Send a chat message.
+   * @param {string} message - User text
+   * @param {string|null} sessionId - Existing session to continue
+   * @param {object} filePayload - Optional: { imageBase64, imageMediaType } or { pdfBase64 }
+   */
+  sendMessage: (message, sessionId, filePayload = {}) =>
+    api.post("/chat/advisor", { message, sessionId, ...filePayload }),
   getSessions: () => api.get("/chat/sessions"),
   getSession: (sessionId) => api.get(`/chat/sessions/${sessionId}`),
 };

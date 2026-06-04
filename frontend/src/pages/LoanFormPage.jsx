@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { loanService } from "../services/loanService";
+import { useAuth } from "../context/AuthContext";
 import toast from "react-hot-toast";
 
 const EMPLOYMENT_TYPES = [
@@ -23,6 +24,7 @@ const RISK_PROFILES = [
 
 const LoanFormPage = () => {
   const navigate = useNavigate();
+  const { refreshUser } = useAuth();
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState({
     loanAmount: "",
@@ -40,23 +42,11 @@ const LoanFormPage = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await loanService.recommend(form);
-      console.log(res,"res")
-
-      localStorage.setItem(
-        "loanProfile",
-        JSON.stringify(form)
-      );
-
-      localStorage.setItem(
-        "recommendation",
-        JSON.stringify(res?.data || {})
-      );
-
+      await loanService.recommend(form);
+      // Refresh user from DB so loanProfile is up-to-date in AuthContext
+      await refreshUser();
       toast.success("Profile submitted! Generating recommendations...");
-
       navigate("/dashboard");
-
     } catch (err) {
       const details = err.response?.data?.details;
       if (details?.length) {

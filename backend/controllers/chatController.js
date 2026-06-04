@@ -1,15 +1,19 @@
 const ChatSession = require("../models/ChatSession");
 const User = require("../models/User");
-const { callLLM } = require("../services/llmService");
+const { callLLM, callLLMWithImage, callLLMWithPDF } = require("../services/llmService");
 const { getRecommendations } = require("../services/recommendationService");
 
 /**
  * POST /api/chat/advisor
- * Handle a chat message — multi-turn, session-aware, user-scoped
+ * Handle a chat message — multi-turn, session-aware, user-scoped.
+ * Supports three modes:
+ *   1. Plain text  { message, sessionId? }
+ *   2. With image  { message, sessionId?, imageBase64, imageMediaType }
+ *   3. With PDF    { message, sessionId?, pdfBase64 }
  */
 const sendMessage = async (req, res, next) => {
   try {
-    const { message, sessionId } = req.body;
+    const { message, sessionId, imageBase64, imageMediaType, pdfBase64 } = req.body;
     const userId = req.user._id;
 
     // Get user's loan profile
@@ -32,7 +36,6 @@ const sendMessage = async (req, res, next) => {
         return res.status(404).json({ error: "Session not found." });
       }
     } else {
-      // Create a new session
       session = await ChatSession.create({
         userId,
         loanContext: loanProfile,
@@ -49,13 +52,33 @@ const sendMessage = async (req, res, next) => {
       content: m.content,
     }));
 
-    // Call LLM with full context
-    const aiResponse = await callLLM(
-      message,
-      conversationHistory,
-      loanProfile,
-      recommendations
-    );
+    // Generate a traceId for observability
+    const traceId = `la-${userId.toString().slice(-6)}-${Date.now()}`;
+
+    // Dispatch to correct LLM method based on what was uploaded
+    let aiResponse;
+    if (imageBase64 && imageMediaType) {
+      // Method 2a: image-grounded query
+      aiResponse = await callLLMWithImage(
+        message,
+        imageBase64,
+        imageMediaType,
+        loanProfile,
+        recommendations
+      );
+    } else if (pdfBase64) {
+      // Method 2b: PDF-grounded query
+      aiResponse = await callLLMWithPDF(message, pdfBase64, loanProfile, recommendations);
+    } else {
+      // Method 1/3: plain text with metadata
+      aiResponse = await callLLM(
+        message,
+        conversationHistory,
+        loanProfile,
+        recommendations,
+        traceId
+      );
+    }
 
     // Persist both messages to session
     session.messages.push({ role: "user", content: message });
@@ -81,6 +104,7 @@ const sendMessage = async (req, res, next) => {
       userMessage: message,
       assistantMessage: aiResponse,
       timestamp: new Date().toISOString(),
+      mode: imageBase64 ? "image" : pdfBase64 ? "pdf" : "text",
     });
   } catch (error) {
     next(error);

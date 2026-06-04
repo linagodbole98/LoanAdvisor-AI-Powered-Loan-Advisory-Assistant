@@ -2,12 +2,14 @@ const fetch = require("node-fetch");
 
 const LLM_API_URL = process.env.LLM_API_URL;
 const LLM_API_TOKEN = process.env.LLM_API_TOKEN;
+const LLM_ENDPOINT = `${LLM_API_URL}/llm/query`;
 
 /**
- * Build a grounded system prompt from the user's loan context.
- * Grounding prevents hallucination — the AI only knows what we inject.
+ * Build the grounded prompt string.
+ * Combines system context + conversation history + current user message
+ * into a single "prompt" field as required by the LLM wrapper spec.
  */
-const buildSystemPrompt = (loanContext, recommendations) => {
+const buildPrompt = (userMessage, conversationHistory, loanContext, recommendations) => {
   const eligibleProducts = recommendations.filter((r) => r.eligible);
   const topProduct = eligibleProducts[0];
 
@@ -15,94 +17,194 @@ const buildSystemPrompt = (loanContext, recommendations) => {
     .slice(0, 3)
     .map(
       (r) =>
-        `- ${r.productName}: ₹${r.emi?.toLocaleString("en-IN")}/month EMI at ${r.interestRate}% for ${r.tenure} months (total repayment ₹${r.totalRepayment?.toLocaleString("en-IN")})`
+        `- ${r.productName}: EMI ₹${r.emi?.toLocaleString("en-IN")}/month @ ${r.interestRate}% p.a. for ${r.tenure} months | Total repayment ₹${r.totalRepayment?.toLocaleString("en-IN")} | Total interest ₹${r.totalInterest?.toLocaleString("en-IN")}`
     )
     .join("\n");
 
-  return `You are a responsible, transparent loan advisory assistant for an Indian fintech platform.
+  // System context block — injected at the top of every prompt
+  const systemBlock = `[SYSTEM]
+You are a responsible, transparent loan advisory assistant for an Indian fintech platform.
 
 BORROWER PROFILE:
 - Loan Amount Requested: ₹${loanContext.loanAmount?.toLocaleString("en-IN")}
 - Monthly Income: ₹${loanContext.monthlyIncome?.toLocaleString("en-IN")}
-- Existing Monthly EMI: ₹${loanContext.existingEMI?.toLocaleString("en-IN") || 0}
+- Existing Monthly EMI: ₹${(loanContext.existingEMI || 0).toLocaleString("en-IN")}
 - Employment Type: ${loanContext.employmentType}
 - Loan Purpose: ${loanContext.loanPurpose || "Not specified"}
 - Preferred Tenure: ${loanContext.preferredTenure} months
 - Risk Profile: ${loanContext.riskProfile}
 
-ELIGIBLE LOAN PRODUCTS (top 3 matches):
+ELIGIBLE LOAN PRODUCTS (top 3 from recommendation engine):
 ${productSummary || "No eligible products found based on current profile."}
 
 TOP RECOMMENDATION: ${topProduct ? topProduct.productName : "None at this time"}
 
-INSTRUCTIONS:
-1. Answer ONLY based on the borrower profile and product data above. Never invent products, rates, or terms not listed.
-2. Always explain EMI amounts and total costs clearly using the numbers above.
-3. When comparing tenures, explain the trade-off: shorter = higher EMI but less total interest; longer = lower EMI but more total interest.
-4. Be empathetic and clear — avoid jargon. Write in simple English.
-5. Always end responses with this disclaimer: "⚠️ This is for informational purposes only. Final loan approval depends on underwriting, credit verification, and lender policies."
-6. Do NOT guarantee loan approval, quote specific lender names, or make promises about rates.
-7. If asked something outside your scope (investments, insurance, tax), politely decline and stay focused on loan advisory.
-8. Keep responses concise — 3 to 5 sentences unless a detailed comparison is requested.`;
+STRICT INSTRUCTIONS:
+1. Answer ONLY using the borrower profile and product data above. Never invent products, rates, or terms not listed here.
+2. Always explain EMI amounts and total costs using the exact figures above.
+3. For tenure comparisons: shorter = higher EMI but less total interest; longer = lower EMI but more total interest.
+4. Be empathetic, clear, and avoid jargon. Write in simple English.
+5. Always end with: "⚠️ This is for informational purposes only. Final loan approval depends on underwriting, credit verification, and lender policies."
+6. Never guarantee approval, name specific lenders, or promise exact rates.
+7. Decline questions outside loan advisory scope (investments, insurance, tax).
+8. Keep responses concise — 3 to 5 sentences unless a detailed comparison is explicitly requested.
+[/SYSTEM]`;
+
+  // Conversation history block (last 6 turns for context efficiency)
+  const historyBlock = conversationHistory
+    .slice(-6)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n");
+
+  // Final assembled prompt
+  return `${systemBlock}
+
+${historyBlock ? `CONVERSATION HISTORY:\n${historyBlock}\n` : ""}
+User: ${userMessage}
+Assistant:`;
 };
 
 /**
- * Call the LLM wrapper API
- * @param {string} userMessage - The user's question
- * @param {Array} conversationHistory - Prior messages [{role, content}]
- * @param {object} loanContext - User's loan profile
- * @param {Array} recommendations - Engine output
- * @returns {string} - AI response text
+ * Core function to POST to the LLM wrapper API.
+ * Follows the exact wrapper spec:
+ *   { prompt, metadata? }
+ *   { prompt, pdfBase64? }
+ *   { prompt, imageBase64?, imageMediaType? }
+ *
+ * @param {object} payload - Must include `prompt`. Optionally: metadata, pdfBase64, imageBase64, imageMediaType
+ * @returns {string} - Extracted text response
  */
-const callLLM = async (userMessage, conversationHistory, loanContext, recommendations) => {
-  // Check if API is configured
+const postToLLM = async (payload) => {
+  const response = await fetch(LLM_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      // Auth exactly as specified: Bearer <api_token>
+      Authorization: `Bearer ${LLM_API_TOKEN}`,
+    },
+    body: JSON.stringify(payload),
+    // node-fetch v2 timeout via signal workaround
+    timeout: 30000,
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`LLM API ${response.status}: ${errText}`);
+  }
+
+  const data = await response.json();
+
+  // The wrapper returns the Claude API response shape: { content: [{type, text}] }
+  if (data.content && Array.isArray(data.content)) {
+    const textBlock = data.content.find((b) => b.type === "text");
+    if (textBlock?.text) return textBlock.text;
+  }
+
+  // Fallback for simpler wrapper shapes
+  return data.response || data.text || data.message || "I couldn't generate a response. Please try again.";
+};
+
+/**
+ * Standard text chat — uses prompt + metadata
+ * @param {string} userMessage
+ * @param {Array}  conversationHistory - [{role, content}]
+ * @param {object} loanContext
+ * @param {Array}  recommendations
+ * @param {string} traceId - optional request trace ID for observability
+ */
+const callLLM = async (userMessage, conversationHistory, loanContext, recommendations, traceId) => {
+  // Graceful fallback when API token not configured
+  if (!LLM_API_TOKEN || LLM_API_TOKEN === "YOUR_API_TOKEN") {
+    console.warn("LLM_API_TOKEN not set — using mock responses");
+    return getMockResponse(userMessage, loanContext, recommendations);
+  }
+
+  try {
+    const prompt = buildPrompt(userMessage, conversationHistory, loanContext, recommendations);
+
+    // Standard text prompt with metadata (method 1 & 3 from spec)
+    const payload = {
+      prompt,
+      metadata: {
+        client: "loan-advisor-backend",
+        // traceId for request observability — real userId NOT sent to external API (privacy)
+        traceId: traceId || `la-${Date.now()}`,
+      },
+    };
+
+    return await postToLLM(payload);
+  } catch (error) {
+    console.error("LLM API call failed:", error.message);
+    return getMockResponse(userMessage, loanContext, recommendations);
+  }
+};
+
+/**
+ * Image-grounded query — for when user uploads a document image (e.g., salary slip photo).
+ * Uses prompt + imageBase64 + imageMediaType (method 2 from spec)
+ *
+ * @param {string} userMessage
+ * @param {string} imageBase64  - raw base64, NO data:...;base64, prefix
+ * @param {string} imageMediaType - "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+ * @param {object} loanContext
+ * @param {Array}  recommendations
+ */
+const callLLMWithImage = async (userMessage, imageBase64, imageMediaType, loanContext, recommendations) => {
   if (!LLM_API_TOKEN || LLM_API_TOKEN === "YOUR_API_TOKEN") {
     return getMockResponse(userMessage, loanContext, recommendations);
   }
 
   try {
-    const systemPrompt = buildSystemPrompt(loanContext, recommendations);
+    const systemContext = buildPrompt(userMessage, [], loanContext, recommendations);
 
-    // Build messages array with conversation history for multi-turn support
-    const messages = [
-      ...conversationHistory.slice(-6), // Keep last 6 messages for context window efficiency
-      { role: "user", content: userMessage },
-    ];
-
-    const response = await fetch(`${LLM_API_URL}/llm/query`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${LLM_API_TOKEN}`,
+    const payload = {
+      prompt: `${systemContext}\n\nThe user has also shared an image (e.g. salary slip or bank statement). Use it to supplement your answer if relevant.`,
+      imageBase64,          // raw base64 only — no data URI prefix
+      imageMediaType,       // e.g. "image/jpeg"
+      metadata: {
+        client: "loan-advisor-backend",
+        type: "image-query",
+        traceId: `la-img-${Date.now()}`,
       },
-      body: JSON.stringify({
-        prompt: `${systemPrompt}\n\nConversation so far:\n${messages
-          .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
-          .join("\n")}\n\nUser: ${userMessage}\nAssistant:`,
-        metadata: {
-          client: "loan-advisor",
-          userId: "session", // Not passing real userId to external API for privacy
-        },
-      }),
-      timeout: 30000,
-    });
+    };
 
-    if (!response.ok) {
-      throw new Error(`LLM API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    // Extract text from response
-    if (data.content && Array.isArray(data.content)) {
-      const textBlock = data.content.find((b) => b.type === "text");
-      return textBlock?.text || "I couldn't generate a response. Please try again.";
-    }
-
-    return data.response || data.text || "I couldn't generate a response.";
+    return await postToLLM(payload);
   } catch (error) {
-    console.error("LLM API call failed:", error.message);
-    // Graceful fallback to mock response
+    console.error("LLM image call failed:", error.message);
+    return getMockResponse(userMessage, loanContext, recommendations);
+  }
+};
+
+/**
+ * PDF-grounded query — for when user uploads a PDF (e.g., loan statement, offer letter).
+ * Uses prompt + pdfBase64 (method 2 from spec)
+ *
+ * @param {string} userMessage
+ * @param {string} pdfBase64  - raw base64, NO data:...;base64, prefix
+ * @param {object} loanContext
+ * @param {Array}  recommendations
+ */
+const callLLMWithPDF = async (userMessage, pdfBase64, loanContext, recommendations) => {
+  if (!LLM_API_TOKEN || LLM_API_TOKEN === "YOUR_API_TOKEN") {
+    return getMockResponse(userMessage, loanContext, recommendations);
+  }
+
+  try {
+    const systemContext = buildPrompt(userMessage, [], loanContext, recommendations);
+
+    const payload = {
+      prompt: `${systemContext}\n\nThe user has uploaded a PDF document. Analyse it in context of their loan query and respond accordingly.`,
+      pdfBase64,            // raw base64 only — no data URI prefix
+      metadata: {
+        client: "loan-advisor-backend",
+        type: "pdf-query",
+        traceId: `la-pdf-${Date.now()}`,
+      },
+    };
+
+    return await postToLLM(payload);
+  } catch (error) {
+    console.error("LLM PDF call failed:", error.message);
     return getMockResponse(userMessage, loanContext, recommendations);
   }
 };
@@ -161,4 +263,4 @@ const getMockResponse = (userMessage, loanContext, recommendations) => {
   return `Hello! I'm your loan advisory assistant. Please submit your loan profile first so I can provide personalized recommendations based on your income, existing obligations, and loan requirements.${disclaimer}`;
 };
 
-module.exports = { callLLM };
+module.exports = { callLLM, callLLMWithImage, callLLMWithPDF };

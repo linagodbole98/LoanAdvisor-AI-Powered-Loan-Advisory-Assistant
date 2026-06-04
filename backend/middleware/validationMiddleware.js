@@ -71,7 +71,14 @@ const chatValidation = [
     .withMessage("Message cannot be empty")
     .isLength({ max: 1000 })
     .withMessage("Message too long (max 1000 characters)"),
-    body("sessionId").optional({ nullable: true }).isMongoId().withMessage("Invalid session ID"),
+  body("sessionId").optional().isMongoId().withMessage("Invalid session ID"),
+  // Optional file fields for image/PDF-grounded queries
+  body("imageBase64").optional().isString().withMessage("imageBase64 must be a string"),
+  body("imageMediaType")
+    .optional()
+    .isIn(["image/jpeg", "image/png", "image/gif", "image/webp"])
+    .withMessage("imageMediaType must be image/jpeg, image/png, image/gif, or image/webp"),
+  body("pdfBase64").optional().isString().withMessage("pdfBase64 must be a string"),
   validate,
 ];
 
